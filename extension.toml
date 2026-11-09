@@ -1,0 +1,90 @@
+# Browser: web links open in tabs that show the page. See Flareite's
+# docs/extensions.md (Links, and Layouts).
+id = "flareite.browser"
+name = "Browser"
+version = "0.1.0"
+description = "Opens web links you Ctrl+click in a tab that shows the page, with back, forward, and reload."
+author = "Flareite"
+icon = "icon.svg"
+api_version = "1"
+# Built by `cargo build --release`. Installed extensions keep the .wasm file
+# next to this manifest instead.
+entrypoint = "target/wasm32-unknown-unknown/release/browser.wasm"
+
+[build]
+command = "cargo"
+args = ["build", "--release"]
+watch = ["src", "Cargo.toml"]
+
+[engines]
+flareite = ">=0.1.0"
+
+# Pages from the web in its tabs. Flareite asks you first.
+[permissions]
+web_pages = true
+
+[[commands]]
+id = "flareite.browser.openAddress"
+title = "Browser: Open Address…"
+
+[[commands]]
+id = "flareite.browser.open"
+title = "Open a Link in a Browser Tab"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.fill"
+title = "Show a Browser Tab"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.navigated"
+title = "Follow a Browser Tab"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.answered"
+title = "Go to the Address Typed"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.back"
+title = "Back"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.forward"
+title = "Forward"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.reload"
+title = "Reload"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.goTo"
+title = "Go to an Address"
+hidden = true
+
+[[commands]]
+id = "flareite.browser.external"
+title = "Open in Your Browser"
+hidden = true
+
+# Web links you Ctrl+click open in a tab, instead of your browser (unless
+# you choose otherwise: workbench.open_web_links, or Ctrl+Shift+click).
+[[link_handlers]]
+id = "tab"
+title = "Open in a Browser Tab"
+kind = "web"
+schemes = ["https", "http"]
+command = "flareite.browser.open"
+
+# A tab that shows a page, with buttons above it. The tab's key is the
+# address it started at.
+[[layouts]]
+id = "page"
+title = "Browser"
+command = "flareite.browser.fill"
+on_navigate = "flareite.browser.navigated"
