@@ -26,5 +26,5 @@ cargo build --release
 
 Then load this folder with **Extensions: Load Development Extension…**. See Flareite's
 `docs/extensions.md` (Links, and Layouts) for the API it uses: a link handler
-(`[[link_handlers]]`, `links::opening`) and a layout with a web page pane (`on_navigate`,
-`layouts::navigated`, `layouts::navigate-pane`).
+(`[[link_handlers]]`, answered by `open-link`) and a layout with a web page pane
+(`layout-fill` and `pane-navigated` events, `layouts::navigate-pane`).

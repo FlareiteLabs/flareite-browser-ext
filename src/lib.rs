@@ -1,26 +1,27 @@
 //! Browser: web links you Ctrl+click (in the terminal, the editor, and
 //! previews) open in a tab that shows the page, instead of in your browser.
-//! It's the two halves of Flareite's API 1.15 that make that work:
+//! It's the two halves of Flareite's API that make that work:
 //!
-//! - a **link handler** (`[[link_handlers]]`): Flareite runs its command
-//!   with the link (`links::opening`), and
+//! - a **link handler** (`[[link_handlers]]`): Flareite asks the extension
+//!   to open the link (`open-link`), and
 //! - a **layout** with a **web page pane**: a browser view of its own in the
-//!   tab, which tells the extension where it goes (`layouts::navigated`) and
-//!   which the extension moves (`layouts::navigate-pane`), with buttons in
-//!   the pane's header.
+//!   tab, which tells the extension where it goes (`pane-navigated` events)
+//!   and which the extension moves (`layouts::navigate-pane`), with buttons
+//!   in the pane's header.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
+use flareite_extension_api::events::Event;
 use flareite_extension_api::layouts::{
-  self, Button, FillReason, Layout, LayoutNode, LayoutTab, NodeKind, Pane, PaneContent, PaneHeader,
-  WebAction,
+  self, Button, FillReason, FillRequest, Layout, LayoutNode, Navigation, NodeKind, Pane,
+  PaneContent, PaneHeader, WebAction,
 };
-use flareite_extension_api::prompts::{self, AnswerValue, InputOptions};
+use flareite_extension_api::links::{self, LinkRequest};
+use flareite_extension_api::prompts::{self, AnswerValue, InputOptions, PromptAnswer};
 use flareite_extension_api::types::{
-  Activation, CommandContext, DocumentChange, DocumentId, DocumentInfo, LogLevel, MessageLevel,
+  Activation, CommandContext, LayoutTab, LogLevel, MessageLevel,
 };
-use flareite_extension_api::{Guest, export_extension, host, links};
+use flareite_extension_api::{Extension, host, register};
 
 const LAYOUT: &str = "page";
 const PANE: &str = "page";
@@ -32,16 +33,14 @@ struct Page {
   loading: bool,
 }
 
-#[derive(Default)]
-struct State {
-  /// Open tabs, by key: the address each started at.
-  pages: HashMap<String, Page>,
-  /// The address asked for, and the tab it's for (`None`: a new tab).
-  asking: Option<(u64, Option<String>)>,
-}
-
-thread_local! {
-  static STATE: RefCell<State> = RefCell::new(State::default());
+impl Page {
+  fn new(url: &str) -> Self {
+    Self {
+      url: url.to_owned(),
+      title: None,
+      loading: true,
+    }
+  }
 }
 
 fn tab(key: &str) -> LayoutTab {
@@ -77,20 +76,6 @@ fn site(url: &str) -> &str {
   rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
-/// Opens an address in a tab of its own (or shows its tab).
-fn open_tab(url: String) {
-  STATE.with_borrow_mut(|state| {
-    state.pages.entry(url.clone()).or_insert(Page {
-      url: url.clone(),
-      title: None,
-      loading: true,
-    });
-  });
-  if let Err(problem) = layouts::open(&tab(&url), false) {
-    log(&format!("can't open a tab for {url}: {problem:?}"));
-  }
-}
-
 fn button(id: &str, title: &str, icon: &str, command: &str) -> Button {
   Button {
     id: id.into(),
@@ -107,16 +92,12 @@ fn button(id: &str, title: &str, icon: &str, command: &str) -> Button {
 /// A tab's layout: the page, under a header with where it is and buttons.
 /// The pane keeps the address it started at, so laying the tab out again
 /// (as the title changes) doesn't move the page.
-fn lay_out(key: &str) {
-  let Some((url, title, loading)) = STATE.with_borrow(|state| {
-    let page = state.pages.get(key)?;
-    Some((page.url.clone(), page.title.clone(), page.loading))
-  }) else {
-    return;
-  };
-  let title = title
+fn lay_out(key: &str, page: &Page) {
+  let title = page
+    .title
+    .clone()
     .filter(|title| !title.trim().is_empty())
-    .unwrap_or_else(|| site(&url).to_owned());
+    .unwrap_or_else(|| site(&page.url).to_owned());
   let layout = Layout {
     title: title.chars().take(200).collect(),
     nodes: vec![LayoutNode {
@@ -126,8 +107,8 @@ fn lay_out(key: &str) {
       kind: NodeKind::Pane(Pane {
         content: PaneContent::WebPage(key.into()),
         header: Some(PaneHeader {
-          title: if loading { "Loading…" } else { "Page" }.into(),
-          description: Some(url.chars().take(500).collect()),
+          title: if page.loading { "Loading…" } else { "Page" }.into(),
+          description: Some(page.url.chars().take(500).collect()),
           buttons: vec![
             button("back", "Back", "chevron-left", "back"),
             button("forward", "Forward", "chevron-right", "forward"),
@@ -149,90 +130,88 @@ fn lay_out(key: &str) {
   }
 }
 
-/// The tab a button was clicked in.
-fn clicked() -> Option<String> {
-  layouts::invoked().map(|from| from.tab.key)
+fn act(key: &str, action: WebAction) {
+  let _ = layouts::navigate_pane(&tab(key), PANE, &action);
 }
 
-fn act(action: WebAction) {
-  if let Some(key) = clicked() {
-    let _ = layouts::navigate_pane(&tab(&key), PANE, &action);
-  }
+#[derive(Default)]
+struct Browser {
+  /// Open tabs, by key: the address each started at.
+  pages: HashMap<String, Page>,
+  /// The address asked for, and the tab it's for (`None`: a new tab).
+  asking: Option<(u64, Option<String>)>,
 }
 
-/// Asks for an address: for the tab clicked in, or (`None`) a new tab.
-fn ask(for_tab: Option<String>) {
-  let value = for_tab
-    .as_ref()
-    .and_then(|key| STATE.with_borrow(|state| Some(state.pages.get(key)?.url.clone())))
-    .unwrap_or_default();
-  let options = InputOptions {
-    title: "Go to an address".into(),
-    value,
-    placeholder: Some("example.com".into()),
-  };
-  match prompts::input(&options, "flareite.browser.answered") {
-    Ok(prompt) => STATE.with_borrow_mut(|state| state.asking = Some((prompt, for_tab))),
-    Err(problem) => log(&format!("can't ask for an address: {problem:?}")),
-  }
-}
-
-fn answered() {
-  let Some(answer) = prompts::answer() else {
-    return;
-  };
-  let Some((_, for_tab)) =
-    STATE.with_borrow_mut(|state| state.asking.take_if(|(prompt, _)| *prompt == answer.prompt))
-  else {
-    return;
-  };
-  let AnswerValue::Text(text) = answer.value else {
-    return;
-  };
-  let Some(url) = address(&text) else {
-    host::show_message(MessageLevel::Warning, &format!("{text} isn't an address."));
-    return;
-  };
-  match for_tab {
-    Some(key) => {
-      let _ = layouts::navigate_pane(&tab(&key), PANE, &WebAction::Go(url));
+impl Browser {
+  /// Opens an address in a tab of its own (or shows its tab).
+  fn open_tab(&mut self, url: String) {
+    self
+      .pages
+      .entry(url.clone())
+      .or_insert_with(|| Page::new(&url));
+    if let Err(problem) = layouts::open(&tab(&url), false) {
+      log(&format!("can't open a tab for {url}: {problem:?}"));
     }
-    None => open_tab(url),
   }
-}
 
-/// The layout's command: fills a tab in, or forgets it.
-fn fill() {
-  let Some(request) = layouts::filling() else {
-    return;
-  };
-  let key = request.tab.key;
-  match request.reason {
-    FillReason::Opened | FillReason::Restored => {
-      STATE.with_borrow_mut(|state| {
-        state.pages.entry(key.clone()).or_insert(Page {
-          url: key.clone(),
-          title: None,
-          loading: true,
-        });
-      });
-      lay_out(&key);
+  /// Asks for an address: for a tab, or (`None`) a new tab.
+  fn ask(&mut self, for_tab: Option<String>) {
+    let value = for_tab
+      .as_ref()
+      .and_then(|key| Some(self.pages.get(key)?.url.clone()))
+      .unwrap_or_default();
+    let options = InputOptions {
+      title: "Go to an address".into(),
+      value,
+      placeholder: Some("example.com".into()),
+    };
+    match prompts::input(&options) {
+      Ok(prompt) => self.asking = Some((prompt, for_tab)),
+      Err(problem) => log(&format!("can't ask for an address: {problem:?}")),
     }
-    FillReason::Closed => {
-      STATE.with_borrow_mut(|state| state.pages.remove(&key));
-    }
-    FillReason::Resized | FillReason::Ready => {}
   }
-}
 
-/// A page went somewhere, finished loading, or got its title.
-fn navigated() {
-  let Some(navigation) = layouts::navigated() else {
-    return;
-  };
-  let key = navigation.tab.key;
-  let changed = STATE.with_borrow_mut(|state| {
-    let page = state.pages.get_mut(&key)?;
+  fn answered(&mut self, answer: PromptAnswer) {
+    let Some((_, for_tab)) = self.asking.take_if(|(prompt, _)| *prompt == answer.prompt) else {
+      return;
+    };
+    let AnswerValue::Text(text) = answer.value else {
+      return;
+    };
+    let Some(url) = address(&text) else {
+      host::show_message(MessageLevel::Warning, &format!("{text} isn't an address."));
+      return;
+    };
+    match for_tab {
+      Some(key) => act(&key, WebAction::Go(url)),
+      None => self.open_tab(url),
+    }
+  }
+
+  /// Fills a tab in, or forgets it.
+  fn fill(&mut self, request: FillRequest) {
+    let key = request.tab.key;
+    match request.reason {
+      FillReason::Opened | FillReason::Restored => {
+        let page = self
+          .pages
+          .entry(key.clone())
+          .or_insert_with(|| Page::new(&key));
+        lay_out(&key, page);
+      }
+      FillReason::Closed => {
+        self.pages.remove(&key);
+      }
+      FillReason::Resized | FillReason::Ready => {}
+    }
+  }
+
+  /// A page went somewhere, finished loading, or got its title.
+  fn navigated(&mut self, navigation: Navigation) {
+    let key = navigation.tab.key;
+    let Some(page) = self.pages.get_mut(&key) else {
+      return;
+    };
     let before = (page.url.clone(), page.title.clone(), page.loading);
     if page.url != navigation.url {
       // A new page: its title comes later.
@@ -243,44 +222,36 @@ fn navigated() {
       page.title = navigation.title;
     }
     page.loading = navigation.loading;
-    Some(before != (page.url.clone(), page.title.clone(), page.loading))
-  });
-  if changed == Some(true) {
-    lay_out(&key);
+    if before != (page.url.clone(), page.title.clone(), page.loading) {
+      lay_out(&key, page);
+    }
   }
 }
 
-struct Browser;
-
-impl Guest for Browser {
-  fn activate(_: Activation) -> Result<(), String> {
-    Ok(())
+impl Extension for Browser {
+  fn activate(_: Activation) -> Result<Self, String> {
+    Ok(Self::default())
   }
 
-  fn deactivate() {}
-
-  fn run_command(command: String, _: CommandContext) -> Result<(), String> {
+  fn run_command(&mut self, command: &str, context: CommandContext) -> Result<(), String> {
+    // The buttons' commands are for the tab they were clicked in.
+    let clicked = context.invoked_from.map(|from| from.tab.key);
     match command.trim_start_matches("flareite.browser.") {
-      "open" => {
-        if let Some(link) = links::opening() {
-          open_tab(link.target);
-        }
-      }
-      "openAddress" => ask(None),
-      "answered" => answered(),
-      "fill" => fill(),
-      "navigated" => navigated(),
-      "back" => act(WebAction::Back),
-      "forward" => act(WebAction::Forward),
-      "reload" => act(WebAction::Reload),
-      "goTo" => ask(clicked()),
-      "external" => {
-        let url = clicked()
-          .and_then(|key| STATE.with_borrow(|state| Some(state.pages.get(&key)?.url.clone())));
-        if let Some(url) = url
-          && let Err(problem) = links::open_in_browser(&url)
-        {
-          log(&format!("can't open {url}: {problem:?}"));
+      "openAddress" => self.ask(None),
+      "goTo" => self.ask(clicked),
+      "back" | "forward" | "reload" | "external" => {
+        let key = clicked.ok_or("click the button in a browser tab")?;
+        match command.trim_start_matches("flareite.browser.") {
+          "back" => act(&key, WebAction::Back),
+          "forward" => act(&key, WebAction::Forward),
+          "reload" => act(&key, WebAction::Reload),
+          _ => {
+            if let Some(page) = self.pages.get(&key)
+              && let Err(problem) = links::open_in_browser(&page.url)
+            {
+              log(&format!("can't open {}: {problem:?}", page.url));
+            }
+          }
         }
       }
       other => return Err(format!("unknown command {other}")),
@@ -288,14 +259,23 @@ impl Guest for Browser {
     Ok(())
   }
 
-  fn document_opened(_: DocumentInfo) {}
+  fn handle_event(&mut self, event: Event) -> Result<(), String> {
+    match event {
+      Event::PromptAnswered(answer) => self.answered(answer),
+      Event::LayoutFill(request) => self.fill(request),
+      Event::PaneNavigated(navigation) => self.navigated(navigation),
+      _ => {}
+    }
+    Ok(())
+  }
 
-  fn document_changed(_: DocumentChange) {}
-
-  fn document_closed(_: DocumentId) {}
+  fn open_link(&mut self, request: LinkRequest) -> Result<bool, String> {
+    self.open_tab(request.link.target);
+    Ok(true)
+  }
 }
 
-export_extension!(Browser);
+register!(Browser);
 
 #[cfg(test)]
 mod tests {

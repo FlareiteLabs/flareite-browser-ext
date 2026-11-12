@@ -2,11 +2,11 @@
 # docs/extensions.md (Links, and Layouts).
 id = "flareite.browser"
 name = "Browser"
-version = "0.1.0"
+version = "1.0.0"
 description = "Opens web links you Ctrl+click in a tab that shows the page, with back, forward, and reload."
 author = "Flareite"
 icon = "icon.svg"
-api_version = "1"
+api_version = "2"
 # Built by `cargo build --release`. Installed extensions keep the .wasm file
 # next to this manifest instead.
 entrypoint = "target/wasm32-unknown-unknown/release/browser.wasm"
@@ -26,26 +26,6 @@ web_pages = true
 [[commands]]
 id = "flareite.browser.openAddress"
 title = "Browser: Open Address…"
-
-[[commands]]
-id = "flareite.browser.open"
-title = "Open a Link in a Browser Tab"
-hidden = true
-
-[[commands]]
-id = "flareite.browser.fill"
-title = "Show a Browser Tab"
-hidden = true
-
-[[commands]]
-id = "flareite.browser.navigated"
-title = "Follow a Browser Tab"
-hidden = true
-
-[[commands]]
-id = "flareite.browser.answered"
-title = "Go to the Address Typed"
-hidden = true
 
 [[commands]]
 id = "flareite.browser.back"
@@ -79,12 +59,9 @@ id = "tab"
 title = "Open in a Browser Tab"
 kind = "web"
 schemes = ["https", "http"]
-command = "flareite.browser.open"
 
-# A tab that shows a page, with buttons above it. The tab's key is the
-# address it started at.
+# A tab that shows a page, with buttons above it (the hidden commands). The
+# tab's key is the address it started at.
 [[layouts]]
 id = "page"
 title = "Browser"
-command = "flareite.browser.fill"
-on_navigate = "flareite.browser.navigated"
